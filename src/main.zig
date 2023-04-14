@@ -1,6 +1,7 @@
 const std = @import("std");
 const mach = @import("mach");
 const gpu = mach.gpu;
+const testImport = @import("test.zig");
 
 pub const App = @This();
 
@@ -11,6 +12,8 @@ pipeline: *gpu.RenderPipeline,
 queue: *gpu.Queue,
 
 pub fn init(app: *App) !void {
+    testImport.testOutput();
+
     try app.core.init(gpa.allocator(), .{});
 
     const shader_module = app.core.device().createShaderModuleWGSL("shader.wgsl", @embedFile("shader.wgsl"));
