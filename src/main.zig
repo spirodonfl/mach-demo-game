@@ -12,8 +12,6 @@ pipeline: *gpu.RenderPipeline,
 queue: *gpu.Queue,
 
 pub fn init(app: *App) !void {
-    testImport.testOutput();
-
     try app.core.init(gpa.allocator(), .{});
 
     const shader_module = app.core.device().createShaderModuleWGSL("shader.wgsl", @embedFile("shader.wgsl"));
