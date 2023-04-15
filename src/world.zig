@@ -6,14 +6,17 @@ pub const World = struct {
     const Self = @This();
 
     size: Vec2,
-    blocked_positions: [128]Vec2,
+    blocked_positions: std.ArrayList(Vec2),
 
-    pub fn init() !Self {
-        return Self{ .size = Vec2{ 32, 32 }, .blocked_positions = undefined };
+    pub fn init(allocator: std.mem.Allocator) !Self {
+        return Self{
+            .size = Vec2{ 32, 32 },
+            .blocked_positions = std.ArrayList(Vec2).init(allocator),
+        };
     }
 
-    pub fn add_blocked_position(self: *Self, index: usize, p: Vec2) void {
-        self.blocked_positions[index] = p;
+    pub fn add_blocked_position(self: *Self, p: Vec2) !void {
+        try self.blocked_positions.append(p);
     }
 
     pub fn remove_blocked_position(self: *Self, index: usize) void {
@@ -35,7 +38,7 @@ test "world blocked positions work" {
     var world = try World.init();
     expect(world.blocked_positions.len == 0) catch {};
     var a = Vec2{ 1, 1 };
-    world.add_blocked_position(0, a);
+    world.add_blocked_position(a);
     expect(world.blocked_positions.len == 1) catch {};
     expect(world.is_blocked_position(a) == true) catch {};
     world.remove_blocked_position(0);

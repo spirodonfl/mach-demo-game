@@ -4,7 +4,7 @@ const expect = std.testing.expect;
 const Position = @import("position.zig").Position;
 const Vec2 = @import("vec2.zig").Vec2;
 
-const NPC = struct {
+pub const NPC = struct {
     const Self = @This();
 
     world_position: Vec2,

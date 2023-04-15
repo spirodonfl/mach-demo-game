@@ -6,10 +6,12 @@ const zigimg = @import("zigimg");
 const assets = @import("assets");
 const imgui = @import("imgui").MachImgui(mach);
 const json = std.json;
+const NPC = @import("npc.zig").NPC;
 const Player = @import("player.zig").Player;
 const Vec2 = @import("vec2.zig").Vec2;
 const World = @import("world.zig").World;
 const Position = @import("position.zig").Position;
+const get_rando = @import("random.zig").get_rando;
 
 pub const App = @This();
 
@@ -418,8 +420,9 @@ depth_stencil_attachment_description: gpu.RenderPassDepthStencilAttachment,
 depth_texture: *gpu.Texture,
 depth_texture_view: *gpu.TextureView,
 player: Player,
-npc: Player,
+npc: NPC,
 world: World,
+npc_render_delay: i8,
 
 pub fn init(app: *App) !void {
     app.allocator = gpa.allocator();
@@ -442,35 +445,36 @@ pub fn init(app: *App) !void {
     defer std.json.parseFree(JSONData, root, .{ .allocator = app.allocator, .ignore_unknown_fields = true, .allow_trailing_data = true });
 
     app.player = try Player.init();
+    app.npc = try NPC.init();
     app.direction = Vec2{ 0, 0 };
     app.sheet = root.sheet;
-    std.log.info("Sheet Dimensions: {} {}", .{ app.sheet.width, app.sheet.height });
+    std.log.info("Sheet Dimensions: {} {}", .{ @floatToInt(i32, app.sheet.width), @floatToInt(i32, app.sheet.height) });
     app.sprites_frames = std.ArrayList(SpriteFrames).init(app.allocator);
     for (root.sprites) |sprite| {
         std.log.info("Typeof Sprite {}", .{@TypeOf(sprite)});
-        std.log.info("Sprite World Position: {} {}", .{ sprite.world_pos[0], sprite.world_pos[1] });
-        std.log.info("Sprite Texture Position: {} {}", .{ sprite.pos[0], sprite.pos[1] });
-        std.log.info("Sprite Dimensions: {} {}", .{ sprite.size[0], sprite.size[1] });
+        std.log.info("Sprite World Position: {} {}", .{ @floatToInt(i32, sprite.world_pos[0]), @floatToInt(i32, sprite.world_pos[1]) });
+        std.log.info("Sprite Texture Position: {} {}", .{ @floatToInt(i32, sprite.pos[0]), @floatToInt(i32, sprite.pos[1]) });
+        std.log.info("Sprite Dimensions: {} {}", .{ @floatToInt(i32, sprite.size[0]), @floatToInt(i32, sprite.size[1]) });
         if (sprite.is_player) {
             app.player.sprite_index = app.sprite_renderer.sprites.items.len;
         }
         if (sprite.is_npc) {
             app.npc.sprite_index = app.sprite_renderer.sprites.items.len;
+            app.npc.world_position[0] = sprite.world_pos[0];
+            app.npc.world_position[1] = sprite.world_pos[1];
         }
         try app.sprite_renderer.addSpriteFromJSON(sprite, app.sheet);
         try app.sprite_renderer_red.addSpriteFromJSON(sprite, app.sheet);
         try app.sprites_frames.append(.{ .up = Vec2{ sprite.frames.up[0], sprite.frames.up[1] }, .down = Vec2{ sprite.frames.down[0], sprite.frames.down[1] }, .left = Vec2{ sprite.frames.left[0], sprite.frames.left[1] }, .right = Vec2{ sprite.frames.right[0], sprite.frames.right[1] } });
     }
     std.log.info("Number of sprites: {}", .{app.sprite_renderer.sprites.items.len});
-    app.world = try World.init();
+    app.world = try World.init(app.allocator);
     app.world.size[0] = root.world.size[0];
     app.world.size[1] = root.world.size[1];
-    var blocked_positions_index: usize = 0;
     for (root.world.blocked_positions) |position| {
-        app.world.add_blocked_position(blocked_positions_index, Vec2{ position[0], position[1] });
-        blocked_positions_index += 1;
+        try app.world.add_blocked_position(Vec2{ position[0], position[1] });
     }
-    std.log.info("Number of world blocked positions: {}", .{blocked_positions_index});
+    std.log.info("Number of world blocked positions: {}", .{app.world.blocked_positions.items.len});
 
     app.sprite_renderer.initSpritesBuffer(&app.core);
     app.sprite_renderer_red.initSpritesBuffer(&app.core);
@@ -515,6 +519,9 @@ pub fn init(app: *App) !void {
         .depth_stencil_format = @enumToInt(gpu.Texture.Format.depth24_plus_stencil8),
     });
 
+    const style = imgui.getStyle();
+    style.window_min_size = .{ 512.0, 256.0 };
+
     setupRenderPass(app);
 
     app.timer = try mach.Timer.start();
@@ -532,7 +539,7 @@ pub fn deinit(app: *App) void {
     app.sprites_frames.deinit();
 }
 
-fn drawUI() void {
+fn drawUI(app: *App) void {
     imgui.setNextWindowPos(.{ .x = 0, .y = 0 });
     if (!imgui.begin("Settings", .{})) {
         imgui.end();
@@ -540,6 +547,8 @@ fn drawUI() void {
     }
 
     imgui.text("Text render!", .{});
+
+    imgui.text("Player World Position X/Y: {}/{}", .{ @floatToInt(i32, app.player.world_position[0]), @floatToInt(i32, app.player.world_position[1]) });
 
     imgui.end();
 }
@@ -555,18 +564,67 @@ pub fn update(app: *App) !bool {
                     .left => {
                         app.direction[0] += 1;
                         app.player.move_right();
+                        var is_blocked: bool = false;
+                        for (app.world.blocked_positions.items) |blocked_position| {
+                            // std.log.info("{} {}", .{ @floatToInt(i32, blocked_position[0]), @floatToInt(i32, blocked_position[1]) });
+                            if (blocked_position[0] == app.player.world_position[0] and blocked_position[1] == app.player.world_position[1]) {
+                                is_blocked = true;
+                            }
+                        }
+                        if (app.npc.world_position[0] == app.player.world_position[0] and app.npc.world_position[1] == app.player.world_position[1]) {
+                            is_blocked = true;
+                        }
+                        if (is_blocked) {
+                            app.player.move_left();
+                        }
                     },
                     .right => {
                         app.direction[0] -= 1;
                         app.player.move_left();
+                        var is_blocked: bool = false;
+                        for (app.world.blocked_positions.items) |blocked_position| {
+                            if (blocked_position[0] == app.player.world_position[0] and blocked_position[1] == app.player.world_position[1]) {
+                                is_blocked = true;
+                            }
+                        }
+                        if (app.npc.world_position[0] == app.player.world_position[0] and app.npc.world_position[1] == app.player.world_position[1]) {
+                            is_blocked = true;
+                        }
+                        if (is_blocked) {
+                            app.player.move_right();
+                        }
                     },
                     .up => {
                         app.direction[1] += 1;
                         app.player.move_up();
+                        var is_blocked: bool = false;
+                        for (app.world.blocked_positions.items) |blocked_position| {
+                            if (blocked_position[0] == app.player.world_position[0] and blocked_position[1] == app.player.world_position[1]) {
+                                is_blocked = true;
+                            }
+                        }
+                        if (app.npc.world_position[0] == app.player.world_position[0] and app.npc.world_position[1] == app.player.world_position[1]) {
+                            is_blocked = true;
+                        }
+                        if (is_blocked) {
+                            app.player.move_down();
+                        }
                     },
                     .down => {
                         app.direction[1] -= 1;
                         app.player.move_down();
+                        var is_blocked: bool = false;
+                        for (app.world.blocked_positions.items) |blocked_position| {
+                            if (blocked_position[0] == app.player.world_position[0] and blocked_position[1] == app.player.world_position[1]) {
+                                is_blocked = true;
+                            }
+                        }
+                        if (app.npc.world_position[0] == app.player.world_position[0] and app.npc.world_position[1] == app.player.world_position[1]) {
+                            is_blocked = true;
+                        }
+                        if (is_blocked) {
+                            app.player.move_up();
+                        }
                     },
                     else => {},
                 }
@@ -598,6 +656,68 @@ pub fn update(app: *App) !bool {
     // regardless of the frame rate.
     const delta_time = app.fps_timer.lap();
     // app.player.world_position += app.direction * Vec2{ speed, speed } * Vec2{ delta_time, delta_time };
+
+    if (app.npc_render_delay == 64) {
+        const value: i64 = try get_rando(0, 3);
+        // std.log.info("Random number: {}", .{value});
+        if (value == 0) {
+            app.npc.move_up();
+            var is_blocked: bool = false;
+            for (app.world.blocked_positions.items) |blocked_position| {
+                if (blocked_position[0] == app.npc.world_position[0] and blocked_position[1] == app.npc.world_position[1]) {
+                    is_blocked = true;
+                }
+            }
+            if (app.npc.world_position[0] == app.player.world_position[0] and app.npc.world_position[1] == app.player.world_position[1]) {
+                is_blocked = true;
+            }
+            if (is_blocked) {
+                app.npc.move_down();
+            }
+        } else if (value == 1) {
+            app.npc.move_down();
+            var is_blocked: bool = false;
+            for (app.world.blocked_positions.items) |blocked_position| {
+                if (blocked_position[0] == app.npc.world_position[0] and blocked_position[1] == app.npc.world_position[1]) {
+                    is_blocked = true;
+                }
+            }
+            if (app.npc.world_position[0] == app.player.world_position[0] and app.npc.world_position[1] == app.player.world_position[1]) {
+                is_blocked = true;
+            }
+            if (is_blocked) {
+                app.npc.move_up();
+            }
+        } else if (value == 2) {
+            app.npc.move_left();
+            var is_blocked: bool = false;
+            for (app.world.blocked_positions.items) |blocked_position| {
+                if (blocked_position[0] == app.npc.world_position[0] and blocked_position[1] == app.npc.world_position[1]) {
+                    is_blocked = true;
+                }
+            }
+            if (app.npc.world_position[0] == app.player.world_position[0] and app.npc.world_position[1] == app.player.world_position[1]) {
+                is_blocked = true;
+            }
+            if (is_blocked) {
+                app.npc.move_right();
+            }
+        } else if (value == 3) {
+            app.npc.move_right();
+            var is_blocked: bool = false;
+            for (app.world.blocked_positions.items) |blocked_position| {
+                if (blocked_position[0] == app.npc.world_position[0] and blocked_position[1] == app.npc.world_position[1]) {
+                    is_blocked = true;
+                }
+            }
+            if (app.npc.world_position[0] == app.player.world_position[0] and app.npc.world_position[1] == app.player.world_position[1]) {
+                is_blocked = true;
+            }
+            if (is_blocked) {
+                app.npc.move_left();
+            }
+        }
+    }
 
     // Render the frame
     try app.render();
@@ -682,6 +802,24 @@ fn render(app: *App) !void {
     }
     player_sprite.world_pos = app.player.world_position;
 
+    if (app.npc_render_delay == 64) {
+        const npc_sprite = &app.sprite_renderer.sprites.items[app.npc.sprite_index];
+        const npc_sprite_frame = &app.sprites_frames.items[app.npc.sprite_index];
+        if (app.direction[0] == -1.0) {
+            npc_sprite.pos = npc_sprite_frame.up;
+        } else if (app.direction[0] == 1.0) {
+            npc_sprite.pos = npc_sprite_frame.down;
+        } else if (app.direction[1] == -1.0) {
+            npc_sprite.pos = npc_sprite_frame.left;
+        } else if (app.direction[1] == 1.0) {
+            npc_sprite.pos = npc_sprite_frame.right;
+        }
+        npc_sprite.world_pos = app.npc.world_position;
+        app.npc_render_delay = 0;
+    } else {
+        app.npc_render_delay += 1;
+    }
+
     // One pixel in our scene will equal one window pixel (i.e. be roughly the same size
     // irrespective of whether the user has a Retina/HDPI display.)
     const proj = zm.orthographicRh(
@@ -727,7 +865,7 @@ fn render(app: *App) !void {
     //     window_size.height,
     // );
     imgui.mach_backend.newFrame();
-    drawUI();
+    drawUI(app);
     imgui.mach_backend.draw(pass);
 
     pass.end();
