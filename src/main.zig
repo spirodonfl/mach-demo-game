@@ -6,12 +6,14 @@ const zigimg = @import("zigimg");
 const assets = @import("assets");
 const imgui = @import("imgui").MachImgui(mach);
 const json = std.json;
+const Player = @import("player.zig").Player;
+const Vec2 = @import("vec2.zig").Vec2;
+const World = @import("world.zig").World;
+const Position = @import("position.zig").Position;
 
 pub const App = @This();
 
 const speed = 2.0 * 100.0; // pixels per second
-
-const Vec2 = @Vector(2, f32);
 
 const UniformBufferObject = struct {
     mat: zm.Mat,
@@ -39,13 +41,19 @@ const JSONSprite = struct {
     size: []f32,
     world_pos: []f32,
     is_player: bool = false,
+    is_npc: bool = false,
     frames: JSONFrames,
+};
+const JSONWorld = struct {
+    size: []f32,
+    blocked_positions: [][]f32,
 };
 const SpriteSheet = struct {
     width: f32,
     height: f32,
 };
 const JSONData = struct {
+    world: JSONWorld,
     sheet: SpriteSheet,
     sprites: []JSONSprite,
 };
@@ -399,9 +407,7 @@ fps_timer: mach.Timer,
 window_title_timer: mach.Timer,
 queue: *gpu.Queue,
 sheet: SpriteSheet,
-player_pos: Vec2,
 direction: Vec2,
-player_sprite_index: usize,
 sprite_renderer: SpriteRenderer,
 sprite_renderer_red: SpriteRendererRed,
 sprites_frames: std.ArrayList(SpriteFrames),
@@ -411,6 +417,9 @@ color_attachment: gpu.RenderPassColorAttachment,
 depth_stencil_attachment_description: gpu.RenderPassDepthStencilAttachment,
 depth_texture: *gpu.Texture,
 depth_texture_view: *gpu.TextureView,
+player: Player,
+npc: Player,
+world: World,
 
 pub fn init(app: *App) !void {
     app.allocator = gpa.allocator();
@@ -429,10 +438,10 @@ pub fn init(app: *App) !void {
     defer app.allocator.free(buffer);
     try sprites_file.reader().readNoEof(buffer);
     var stream = std.json.TokenStream.init(buffer);
-    const root = try std.json.parse(JSONData, &stream, .{ .allocator = app.allocator });
-    defer std.json.parseFree(JSONData, root, .{ .allocator = app.allocator });
+    const root = try std.json.parse(JSONData, &stream, .{ .allocator = app.allocator, .ignore_unknown_fields = true, .allow_trailing_data = true });
+    defer std.json.parseFree(JSONData, root, .{ .allocator = app.allocator, .ignore_unknown_fields = true, .allow_trailing_data = true });
 
-    app.player_pos = Vec2{ 0, 0 };
+    app.player = try Player.init();
     app.direction = Vec2{ 0, 0 };
     app.sheet = root.sheet;
     std.log.info("Sheet Dimensions: {} {}", .{ app.sheet.width, app.sheet.height });
@@ -443,13 +452,25 @@ pub fn init(app: *App) !void {
         std.log.info("Sprite Texture Position: {} {}", .{ sprite.pos[0], sprite.pos[1] });
         std.log.info("Sprite Dimensions: {} {}", .{ sprite.size[0], sprite.size[1] });
         if (sprite.is_player) {
-            app.player_sprite_index = app.sprite_renderer.sprites.items.len;
+            app.player.sprite_index = app.sprite_renderer.sprites.items.len;
+        }
+        if (sprite.is_npc) {
+            app.npc.sprite_index = app.sprite_renderer.sprites.items.len;
         }
         try app.sprite_renderer.addSpriteFromJSON(sprite, app.sheet);
         try app.sprite_renderer_red.addSpriteFromJSON(sprite, app.sheet);
         try app.sprites_frames.append(.{ .up = Vec2{ sprite.frames.up[0], sprite.frames.up[1] }, .down = Vec2{ sprite.frames.down[0], sprite.frames.down[1] }, .left = Vec2{ sprite.frames.left[0], sprite.frames.left[1] }, .right = Vec2{ sprite.frames.right[0], sprite.frames.right[1] } });
     }
     std.log.info("Number of sprites: {}", .{app.sprite_renderer.sprites.items.len});
+    app.world = try World.init();
+    app.world.size[0] = root.world.size[0];
+    app.world.size[1] = root.world.size[1];
+    var blocked_positions_index: usize = 0;
+    for (root.world.blocked_positions) |position| {
+        app.world.add_blocked_position(blocked_positions_index, Vec2{ position[0], position[1] });
+        blocked_positions_index += 1;
+    }
+    std.log.info("Number of world blocked positions: {}", .{blocked_positions_index});
 
     app.sprite_renderer.initSpritesBuffer(&app.core);
     app.sprite_renderer_red.initSpritesBuffer(&app.core);
@@ -531,19 +552,39 @@ pub fn update(app: *App) !bool {
             .key_press => |ev| {
                 switch (ev.key) {
                     .space => return true,
-                    .left => app.direction[0] += 1,
-                    .right => app.direction[0] -= 1,
-                    .up => app.direction[1] += 1,
-                    .down => app.direction[1] -= 1,
+                    .left => {
+                        app.direction[0] += 1;
+                        app.player.move_right();
+                    },
+                    .right => {
+                        app.direction[0] -= 1;
+                        app.player.move_left();
+                    },
+                    .up => {
+                        app.direction[1] += 1;
+                        app.player.move_up();
+                    },
+                    .down => {
+                        app.direction[1] -= 1;
+                        app.player.move_down();
+                    },
                     else => {},
                 }
             },
             .key_release => |ev| {
                 switch (ev.key) {
-                    .left => app.direction[0] -= 1,
-                    .right => app.direction[0] += 1,
-                    .up => app.direction[1] -= 1,
-                    .down => app.direction[1] += 1,
+                    .left => {
+                        app.direction[0] -= 1;
+                    },
+                    .right => {
+                        app.direction[0] += 1;
+                    },
+                    .up => {
+                        app.direction[1] -= 1;
+                    },
+                    .down => {
+                        app.direction[1] += 1;
+                    },
                     else => {},
                 }
             },
@@ -556,7 +597,7 @@ pub fn update(app: *App) !bool {
     // by the speed amount. Multiply by delta_time to ensure that movement is the same speed
     // regardless of the frame rate.
     const delta_time = app.fps_timer.lap();
-    app.player_pos += app.direction * Vec2{ speed, speed } * Vec2{ delta_time, delta_time };
+    // app.player.world_position += app.direction * Vec2{ speed, speed } * Vec2{ delta_time, delta_time };
 
     // Render the frame
     try app.render();
@@ -628,8 +669,8 @@ fn render(app: *App) !void {
         .depth_stencil_attachment = &app.depth_stencil_attachment_description,
     });
 
-    const player_sprite = &app.sprite_renderer.sprites.items[app.player_sprite_index];
-    const player_sprite_frame = &app.sprites_frames.items[app.player_sprite_index];
+    const player_sprite = &app.sprite_renderer.sprites.items[app.player.sprite_index];
+    const player_sprite_frame = &app.sprites_frames.items[app.player.sprite_index];
     if (app.direction[0] == -1.0) {
         player_sprite.pos = player_sprite_frame.up;
     } else if (app.direction[0] == 1.0) {
@@ -639,7 +680,7 @@ fn render(app: *App) !void {
     } else if (app.direction[1] == 1.0) {
         player_sprite.pos = player_sprite_frame.right;
     }
-    player_sprite.world_pos = app.player_pos;
+    player_sprite.world_pos = app.player.world_position;
 
     // One pixel in our scene will equal one window pixel (i.e. be roughly the same size
     // irrespective of whether the user has a Retina/HDPI display.)
